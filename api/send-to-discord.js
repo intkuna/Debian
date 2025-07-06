@@ -2,7 +2,6 @@ export default async (req, res) => {
   const ALLOWED_USER_AGENT = "DebianSystemReporter/1.0";
   const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 
-  // Vérification de la configuration
   if (!WEBHOOK_URL) {
     return res.status(500).json({ 
       error: "Server configuration error",
@@ -10,7 +9,6 @@ export default async (req, res) => {
     });
   }
 
-  // Validation du User-Agent
   const userAgent = req.headers['user-agent'];
   if (userAgent !== ALLOWED_USER_AGENT) {
     return res.status(403).json({ 
@@ -19,7 +17,6 @@ export default async (req, res) => {
     });
   }
 
-  // Validation de la méthode
   if (req.method !== 'POST') {
     return res.status(405).json({ 
       error: "Method not allowed",
@@ -27,12 +24,10 @@ export default async (req, res) => {
     });
   }
 
-  // Traitement du payload
   let payload;
   try {
     payload = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     
-    // Formatage pour Discord
     const discordPayload = {
       content: "Nouveau rapport système",
       embeds: [{
@@ -43,7 +38,6 @@ export default async (req, res) => {
       }]
     };
 
-    // Envoi à Discord
     const discordResponse = await fetch(WEBHOOK_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
