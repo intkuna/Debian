@@ -1,52 +1,69 @@
 export default async (req, res) => {
   const ALLOWED_USER_AGENT = "DebianSystemReporter/1.0";
   const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
-  const SECURITY_WEBHOOK_URL = process.env.SECURITY_WEBHOOK_URL; // Webhook pour les alertes de sécurité
+  const SECURITY_WEBHOOK_URL = process.env.SECURITY_WEBHOOK_URL;
 
-  // Vérification de base
   if (!WEBHOOK_URL) {
-    console.error("Configuration manquante: DISCORD_WEBHOOK_URL");
+    console.error("Missing configuration: DISCORD_WEBHOOK_URL");
     return res.status(500).json({ error: "Server configuration error" });
   }
 
-  // Vérification du User-Agent
-  const userAgent = req.headers['user-agent'];
+  const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress || 'Unknown IP';
+  const userAgent = req.headers['user-agent'] || 'Not provided';
+
   if (userAgent !== ALLOWED_USER_AGENT) {
-    await logSecurityAttempt(req, "Tentative d'accès avec User-Agent invalide", SECURITY_WEBHOOK_URL);
-    return res.status(403).json({ error: "Unauthorized" });
+    const alertMessage = `🚨 Unauthorized access attempt 🚨\n` +
+                        `**IP:** ${ip}\n` +
+                        `**User-Agent used:** ${userAgent}`;
+    
+    await sendSecurityAlert(alertMessage, SECURITY_WEBHOOK_URL);
+    return res.status(403).json({ error: "Unauthorized access" });
   }
 
-  // Vérification de la méthode
   if (req.method !== 'POST') {
-    await logSecurityAttempt(req, "Tentative avec méthode non autorisée", SECURITY_WEBHOOK_URL);
+    await sendSecurityAlert(
+      `⚠️ ${req.method} attempt from IP: ${ip}`,
+      SECURITY_WEBHOOK_URL
+    );
     return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
-    const payload = parsePayload(req.body);
+    const payload = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     
-    // Détection des tentatives suspectes
-    if (!hasValidEmbeds(payload)) {
-      await logSecurityAttempt(req, "Tentative sans embed détectée", SECURITY_WEBHOOK_URL);
+    if (!payload.embeds || payload.embeds.length === 0) {
+      const details = `**IP:** ${ip}\n` +
+                     `**Received payload:**\n\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\``;
       
-      // Envoi d'un message spécial au webhook principal
-      await sendSecurityAlert(WEBHOOK_URL, req);
-      
+      await sendSecurityAlert(
+        "🚨 Attempt to send without embeds detected 🚨\n" + details,
+        SECURITY_WEBHOOK_URL
+      );
+
+      await sendToDiscord(WEBHOOK_URL, {
+        content: "⚠️ **Suspicious attempt detected** ⚠️",
+        embeds: [{
+          title: "Security Alert",
+          description: "Someone tried to use the API without required data",
+          color: 0xff0000,
+          fields: [
+            { name: "IP", value: ip },
+            { name: "Payload", value: "```json\n" + JSON.stringify(payload, null, 2) + "\n```" }
+          ],
+          timestamp: new Date().toISOString()
+        }]
+      });
+
       return res.status(400).json({ error: "Invalid payload format" });
     }
 
-    // Envoi normal à Discord
-    const response = await fetch(WEBHOOK_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
+    const response = await sendToDiscord(WEBHOOK_URL, payload);
 
     if (!response.ok) {
-      throw new Error(`Discord API error: ${response.status}`);
+      throw new Error(`Discord error: ${response.status}`);
     }
 
-    return res.status(200).json({ success: true });
+    return res.status(200).json({ success: true, message: "Message sent successfully" });
 
   } catch (error) {
     console.error("Error:", error);
@@ -54,71 +71,30 @@ export default async (req, res) => {
   }
 };
 
-// Fonctions utilitaires
-async function logSecurityAttempt(req, reason, securityWebhook) {
-  const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
-  console.warn(`SECURITY: ${reason} from IP: ${ip}`);
-
-  if (securityWebhook) {
-    const alertData = {
-      content: `⚠️ **Tentative d'accès suspecte détectée**`,
-      embeds: [{
-        title: "Alerte de sécurité",
-        description: reason,
-        color: 0xff0000,
-        fields: [
-          { name: "IP", value: ip || "Inconnue" },
-          { name: "Méthode", value: req.method },
-          { name: "User-Agent", value: req.headers['user-agent'] || "Non fourni" }
-        ],
-        timestamp: new Date().toISOString()
-      }]
-    };
-
-    try {
-      await fetch(securityWebhook, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(alertData)
-      });
-    } catch (e) {
-      console.error("Failed to send security alert:", e);
-    }
+async function sendSecurityAlert(message, webhookUrl) {
+  if (!webhookUrl) {
+    console.log("Security alert (webhook not configured):", message);
+    return;
   }
-}
-
-function parsePayload(body) {
-  return typeof body === 'string' ? JSON.parse(body) : body;
-}
-
-function hasValidEmbeds(payload) {
-  // Vérifie que le payload contient au moins un embed valide
-  return payload.embeds?.length > 0 || 
-         (payload.title && payload.description); // Ou des champs minimum
-}
-
-async function sendSecurityAlert(webhookUrl, req) {
-  const alertPayload = {
-    content: "🚨 **Tentative d'accès suspecte détectée** 🚨",
-    embeds: [{
-      title: "Activité suspecte",
-      description: "Quelqu'un a tenté d'utiliser l'API sans fournir les données requises",
-      color: 0xff0000,
-      fields: [
-        { name: "IP", value: req.headers['x-forwarded-for'] || "Inconnue" },
-        { name: "Payload", value: "```json\n" + JSON.stringify(req.body, null, 2) + "\n```" }
-      ],
-      timestamp: new Date().toISOString()
-    }]
-  };
 
   try {
     await fetch(webhookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(alertPayload)
+      body: JSON.stringify({
+        content: message,
+        flags: 4
+      })
     });
   } catch (e) {
-    console.error("Failed to send main webhook alert:", e);
+    console.error("Failed to send security alert:", e);
   }
+}
+
+async function sendToDiscord(webhookUrl, payload) {
+  return await fetch(webhookUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
 }
