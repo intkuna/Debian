@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>System Info Reporter</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+    button { padding: 10px 15px; background: #4CAF50; color: white; border: none; cursor: pointer; }
+    button:hover { background: #45a049; }
+    #status { margin-top: 20px; padding: 10px; border-radius: 4px; }
+    .success { background: #dff0d8; color: #3c763d; }
+    .error { background: #f2dede; color: #a94442; }
+  </style>
+</head>
+<body>
+  <h1>System Info Reporter</h1>
+  <button id="sendBtn">Send System Info</button>
+  <div id="status"></div>
+
+  <script>
+    document.getElementById('sendBtn').addEventListener('click', async () => {
+      const statusEl = document.getElementById('status');
+      statusEl.textContent = "Collecting system information...";
+      statusEl.className = "";
+      
+      try {
+        // In a real implementation, you would collect actual system info here
+        const mockData = {
+          username: "testuser",
+          hostname: "test-machine",
+          os: "Windows 10",
+          timestamp: new Date().toISOString()
+        };
+
+        const response = await fetch('/api/send-to-discord', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': 'DebianSystemReporter/1.0'
+          },
+          body: JSON.stringify(mockData)
+        });
+
+        const result = await response.json();
+        
+        if (response.ok) {
+          statusEl.textContent = "Data sent successfully!";
+          statusEl.className = "success";
+        } else {
+          statusEl.textContent = `Error: ${result.error || 'Unknown error'}`;
+          statusEl.className = "error";
+        }
+      } catch (error) {
+        statusEl.textContent = `Network error: ${error.message}`;
+        statusEl.className = "error";
+      }
+    });
+  </script>
+</body>
+</html>
