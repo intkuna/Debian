@@ -1,10 +1,11 @@
 import multer from 'multer';
 import fetch from 'node-fetch';
+import FormData from 'form-data';
 
-// Configure multer for multipart parsing (memory storage)
+// Configure multer for memory storage (handles multipart parsing)
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Helper to process multipart/form-data
+// Helper to process multipart requests
 const processMultipart = (req, res) => new Promise((resolve, reject) => {
   upload.any()(req, res, (err) => {
     if (err) reject(err);
@@ -17,51 +18,48 @@ export default async (req, res) => {
   const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
   const SECURITY_WEBHOOK_URL = process.env.SECURITY_WEBHOOK_URL;
 
-  if (!WEBHOOK_URL) {
-    return res.status(500).json({ error: "Server configuration error" });
-  }
+  // Security checks
+  const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress;
+  const userAgent = req.headers['user-agent'] || '';
 
-  const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress || 'Unknown';
-  const userAgent = req.headers['user-agent'] || 'Not provided';
-
-  const handleSecurityAlert = async (alertData) => {
+  const sendSecurityAlert = async (alertData) => {
     if (!SECURITY_WEBHOOK_URL) return;
     
-    const embed = {
-      title: alertData.title || "Security Alert",
-      description: alertData.description,
-      color: 0xff0000,
-      fields: alertData.fields || [],
-      timestamp: new Date().toISOString()
-    };
-
     await fetch(SECURITY_WEBHOOK_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ embeds: [embed] })
+      body: JSON.stringify({
+        embeds: [{
+          title: alertData.title || "Security Alert",
+          description: alertData.description,
+          color: 0xff0000,
+          fields: alertData.fields || [],
+          timestamp: new Date().toISOString()
+        }]
+      })
     }).catch(console.error);
   };
 
-  // Auth & method checks
+  // 1. Verify User-Agent
   if (userAgent !== ALLOWED_USER_AGENT) {
-    await handleSecurityAlert({
+    await sendSecurityAlert({
       title: "Unauthorized Access Attempt",
-      description: "Invalid User-Agent detected",
+      description: `Blocked request from ${ip}`,
       fields: [
-        { name: "IP Address", value: ip, inline: true },
-        { name: "User-Agent", value: userAgent, inline: true },
-        { name: "Endpoint", value: req.url, inline: true }
+        { name: "User-Agent", value: userAgent || "None" },
+        { name: "Endpoint", value: req.url }
       ]
     });
     return res.status(403).json({ error: "Unauthorized" });
   }
 
+  // 2. Verify HTTP Method
   if (req.method !== 'POST') {
-    await handleSecurityAlert({
-      description: `Invalid HTTP method (${req.method}) used`,
+    await sendSecurityAlert({
+      description: `Invalid method: ${req.method}`,
       fields: [
-        { name: "IP Address", value: ip },
-        { name: "Expected Method", value: "POST" }
+        { name: "IP", value: ip },
+        { name: "Expected", value: "POST" }
       ]
     });
     return res.status(405).json({ error: "Method not allowed" });
@@ -71,61 +69,64 @@ export default async (req, res) => {
     let payload;
     let files = [];
 
-    // Handle multipart (Go client)
+    // 3. Parse request based on Content-Type
     if (req.headers['content-type']?.includes('multipart/form-data')) {
+      // Handle multipart (Go client)
       const processedReq = await processMultipart(req, res);
-      
-      // Extract JSON payload
-      if (processedReq.body?.payload_json) {
-        payload = JSON.parse(processedReq.body.payload_json);
-      } else {
-        throw new Error("Missing payload_json in multipart request");
-      }
-
-      // Extract files (e.g., screenshot)
+      payload = JSON.parse(processedReq.body.payload_json || '{}');
       files = processedReq.files || [];
-    } 
-    // Handle raw JSON (standard Discord webhooks)
-    else {
+    } else {
+      // Handle JSON (normal requests)
       payload = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     }
 
-    // Validate payload
-    if (!payload.embeds?.length) {
-      await handleSecurityAlert({
-        title: "Invalid Payload Structure",
-        description: "Attempt to send message without embeds",
+    // 4. Validate payload
+    if (!payload.embeds || !Array.isArray(payload.embeds)) {
+      await sendSecurityAlert({
+        title: "Invalid Payload",
+        description: "Missing or invalid 'embeds' array",
         fields: [
-          { name: "IP Address", value: ip },
-          { name: "Payload", value: `\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\`` }
+          { name: "IP", value: ip },
+          { name: "Payload", value: JSON.stringify(payload).slice(0, 1000) }
         ]
       });
-      return res.status(400).json({ error: "Invalid payload format" });
+      return res.status(400).json({ error: "Payload must contain 'embeds' array" });
     }
 
-    // Forward to Discord (with files if available)
-    const formData = new FormData();
-    formData.append('payload_json', JSON.stringify(payload));
-
-    if (files.length > 0) {
-      files.forEach(file => {
-        formData.append(file.fieldname, file.buffer, file.originalname);
+    // 5. Forward to Discord
+    const discordForm = new FormData();
+    discordForm.append('payload_json', JSON.stringify(payload));
+    
+    // Attach files if present
+    files.forEach(file => {
+      discordForm.append('file', file.buffer, {
+        filename: file.originalname,
+        contentType: file.mimetype
       });
-    }
-
-    const response = await fetch(WEBHOOK_URL, {
-      method: 'POST',
-      body: formData
     });
 
-    if (!response.ok) {
-      throw new Error(`Discord API responded with ${response.status}`);
+    const discordResponse = await fetch(WEBHOOK_URL, {
+      method: 'POST',
+      body: discordForm
+    });
+
+    if (!discordResponse.ok) {
+      const errorText = await discordResponse.text();
+      throw new Error(`Discord error: ${discordResponse.status} - ${errorText}`);
     }
 
     return res.status(200).json({ success: true });
 
   } catch (error) {
-    console.error(`Processing error: ${error.message}`);
+    console.error('[API Error]', error.message);
+    await sendSecurityAlert({
+      title: "Processing Error",
+      description: error.message,
+      fields: [
+        { name: "IP", value: ip },
+        { name: "Stack", value: error.stack?.split('\n')[0] || 'No stack' }
+      ]
+    });
     return res.status(500).json({ error: "Internal server error" });
   }
 };
