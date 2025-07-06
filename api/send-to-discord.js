@@ -1,29 +1,25 @@
-// /api/send-to-discord.js
 export default async (req, res) => {
-  // 1. Configuration
   const ALLOWED_USER_AGENT = "DebianSystemReporter/1.0";
   const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 
-  // 2. Vérification des prérequis
+  // Vérification de la configuration
   if (!WEBHOOK_URL) {
-    console.error("DISCORD_WEBHOOK_URL environment variable is not set");
     return res.status(500).json({ 
       error: "Server configuration error",
       details: "Webhook URL not configured"
     });
   }
 
-  // 3. Validation du User-Agent
+  // Validation du User-Agent
   const userAgent = req.headers['user-agent'];
   if (userAgent !== ALLOWED_USER_AGENT) {
-    console.warn(`Unauthorized access attempt with User-Agent: ${userAgent}`);
     return res.status(403).json({ 
       error: "Unauthorized",
       details: "Invalid User-Agent header"
     });
   }
 
-  // 4. Validation de la méthode HTTP
+  // Validation de la méthode
   if (req.method !== 'POST') {
     return res.status(405).json({ 
       error: "Method not allowed",
@@ -31,52 +27,44 @@ export default async (req, res) => {
     });
   }
 
-  // 5. Validation du corps de la requête
+  // Traitement du payload
   let payload;
   try {
     payload = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
-    if (!payload || typeof payload !== 'object') {
-      throw new Error("Invalid payload format");
-    }
-  } catch (e) {
-    return res.status(400).json({
-      error: "Bad request",
-      details: "Invalid JSON payload",
-      required_format: "application/json"
-    });
-  }
+    
+    // Formatage pour Discord
+    const discordPayload = {
+      content: "Nouveau rapport système",
+      embeds: [{
+        title: "Rapport Système",
+        description: `Système: ${payload.system || 'Inconnu'}\nStatut: ${payload.status || 'Inconnu'}`,
+        color: 0x00ff00,
+        timestamp: new Date().toISOString()
+      }]
+    };
 
-  // 6. Envoi à Discord
-  try {
+    // Envoi à Discord
     const discordResponse = await fetch(WEBHOOK_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(discordPayload)
     });
 
     if (!discordResponse.ok) {
       const errorBody = await discordResponse.text();
-      console.error(`Discord API error: ${discordResponse.status} - ${errorBody}`);
-      return res.status(502).json({
-        error: "Bad gateway",
-        details: "Discord API returned an error",
-        discord_status: discordResponse.status,
-        discord_response: errorBody
-      });
+      throw new Error(`Discord API error: ${discordResponse.status} - ${errorBody}`);
     }
 
-    // 7. Réponse succès
     return res.status(200).json({ 
       success: true,
-      message: "Payload forwarded to Discord successfully"
+      message: "Message envoyé à Discord avec succès"
     });
 
   } catch (error) {
-    console.error("API processing error:", error);
+    console.error("Error:", error);
     return res.status(500).json({
       error: "Internal server error",
-      details: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      details: error.message
     });
   }
 };
