@@ -1,11 +1,11 @@
-import fetch from 'node-fetch'; // if you are in Node.js, else native fetch in modern env
+import fetch from 'node-fetch';
 import FormData from 'form-data';
 import multer from 'multer';
 
-// Multer config for memory storage (no disk)
+// Multer setup: store files in memory for immediate upload (no disk I/O)
 const upload = multer({ storage: multer.memoryStorage() });
 
-// Helper: run multer middleware as a promise
+// Helper to promisify multer middleware
 function runMulter(req, res) {
   return new Promise((resolve, reject) => {
     upload.any()(req, res, (err) => {
@@ -19,14 +19,21 @@ const ALLOWED_USER_AGENT = "DebianSystemReporter/1.0";
 const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 const SECURITY_WEBHOOK_URL = process.env.SECURITY_WEBHOOK_URL;
 
+/**
+ * API handler for forwarding messages and attachments to Discord webhook.
+ * Supports JSON body or multipart/form-data with attachments.
+ */
 export default async function handler(req, res) {
   if (!WEBHOOK_URL) {
-    return res.status(500).json({ error: "Server configuration error" });
+    return res.status(500).json({ error: "Server configuration error: WEBHOOK_URL not set" });
   }
 
   const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress || 'Unknown';
   const userAgent = req.headers['user-agent'] || 'Not provided';
 
+  /**
+   * Sends a security alert to the SECURITY_WEBHOOK_URL (if configured).
+   */
   async function handleSecurityAlert(alertData) {
     if (!SECURITY_WEBHOOK_URL) return;
 
@@ -45,11 +52,11 @@ export default async function handler(req, res) {
         body: JSON.stringify({ embeds: [embed] })
       });
     } catch (err) {
-      console.error("Security alert webhook failed:", err);
+      console.error("Failed to send security alert:", err);
     }
   }
 
-  // Security check - user agent
+  // Security check: enforce specific User-Agent
   if (userAgent !== ALLOWED_USER_AGENT) {
     await handleSecurityAlert({
       title: "Unauthorized Access Attempt",
@@ -63,6 +70,7 @@ export default async function handler(req, res) {
     return res.status(403).json({ error: "Unauthorized" });
   }
 
+  // Only allow POST requests
   if (req.method !== 'POST') {
     await handleSecurityAlert({
       description: `Invalid HTTP method (${req.method}) used`,
@@ -75,28 +83,28 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Parse multipart/form-data (with files) OR JSON body
+    const contentType = req.headers['content-type'] || '';
+
     let payload = null;
     let attachments = [];
 
-    const contentType = req.headers['content-type'] || '';
-
     if (contentType.startsWith('multipart/form-data')) {
+      // Parse multipart form with multer
       await runMulter(req, res);
 
-      // Expect a field named "payload_json" with the Discord payload JSON (embeds, content, etc)
+      // Expect the JSON payload in 'payload_json' field
       const payloadJsonStr = req.body.payload_json;
       if (!payloadJsonStr) {
-        return res.status(400).json({ error: "Missing payload_json in multipart form data" });
+        return res.status(400).json({ error: "Missing 'payload_json' field in multipart form data" });
       }
 
       try {
         payload = JSON.parse(payloadJsonStr);
       } catch {
-        return res.status(400).json({ error: "Invalid JSON in payload_json field" });
+        return res.status(400).json({ error: "Invalid JSON in 'payload_json' field" });
       }
 
-      // Collect files as Discord attachments
+      // Collect files for Discord attachments
       if (req.files && req.files.length > 0) {
         attachments = req.files.map((file, idx) => ({
           id: idx,
@@ -105,16 +113,18 @@ export default async function handler(req, res) {
           buffer: file.buffer,
         }));
 
-        // Discord expects 'attachments' array in payload with id/filename references
-        payload.attachments = attachments.map(a => ({
-          id: a.id,
-          filename: a.filename,
+        // Add attachment metadata to payload as Discord expects
+        payload.attachments = attachments.map(file => ({
+          id: file.id,
+          filename: file.filename,
         }));
       }
 
     } else if (contentType.includes('application/json')) {
+      // Parse JSON body directly
       payload = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
 
+      // Validate minimal payload requirement (embeds)
       if (!payload.embeds?.length) {
         await handleSecurityAlert({
           title: "Invalid Payload Structure",
@@ -124,24 +134,22 @@ export default async function handler(req, res) {
             { name: "Payload", value: `\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\`` }
           ]
         });
-        return res.status(400).json({ error: "Invalid payload format: embeds required" });
+        return res.status(400).json({ error: "Invalid payload format: embeds array required" });
       }
     } else {
-      return res.status(415).json({ error: "Unsupported content type" });
+      return res.status(415).json({ error: `Unsupported Content-Type: ${contentType}` });
     }
 
-    // Send to Discord webhook
+    // Send data to Discord webhook
     let discordResponse;
 
     if (attachments.length > 0) {
-      // Send multipart/form-data with attachments
-
+      // Build multipart form-data for Discord webhook with attachments
       const form = new FormData();
       form.append('payload_json', JSON.stringify(payload));
 
-      // Attach files
-      attachments.forEach((file) => {
-        form.append('files[' + file.id + ']', file.buffer, {
+      attachments.forEach(file => {
+        form.append(`files[${file.id}]`, file.buffer, {
           filename: file.filename,
           contentType: file.contentType,
         });
@@ -150,11 +158,10 @@ export default async function handler(req, res) {
       discordResponse = await fetch(WEBHOOK_URL, {
         method: 'POST',
         headers: form.getHeaders(),
-        body: form,
+        body: form
       });
-
     } else {
-      // Just JSON
+      // Send JSON payload only
       discordResponse = await fetch(WEBHOOK_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -163,13 +170,14 @@ export default async function handler(req, res) {
     }
 
     if (!discordResponse.ok) {
-      throw new Error(`Discord API responded with status ${discordResponse.status}`);
+      const text = await discordResponse.text();
+      throw new Error(`Discord API error ${discordResponse.status}: ${text}`);
     }
 
     return res.status(200).json({ success: true });
 
   } catch (error) {
-    console.error("Processing error:", error);
+    console.error("Internal processing error:", error);
     return res.status(500).json({ error: "Internal server error" });
   }
 }
