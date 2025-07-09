@@ -1,45 +1,55 @@
-import formidable from "formidable";
-import fs from "fs";
+import fetch from 'node-fetch'; // if you are in Node.js, else native fetch in modern env
+import FormData from 'form-data';
+import multer from 'multer';
 
-export const config = {
-  api: {
-    bodyParser: false, // obligatoire pour formidable
-  },
-};
+// Multer config for memory storage (no disk)
+const upload = multer({ storage: multer.memoryStorage() });
+
+// Helper: run multer middleware as a promise
+function runMulter(req, res) {
+  return new Promise((resolve, reject) => {
+    upload.any()(req, res, (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+}
+
+const ALLOWED_USER_AGENT = "DebianSystemReporter/1.0";
+const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
+const SECURITY_WEBHOOK_URL = process.env.SECURITY_WEBHOOK_URL;
 
 export default async function handler(req, res) {
-  const ALLOWED_USER_AGENT = "DebianSystemReporter/1.0";
-  const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
-  const SECURITY_WEBHOOK_URL = process.env.SECURITY_WEBHOOK_URL;
-
   if (!WEBHOOK_URL) {
     return res.status(500).json({ error: "Server configuration error" });
   }
 
-  const ip =
-    req.headers["x-forwarded-for"] ||
-    req.connection.remoteAddress ||
-    "Unknown";
-  const userAgent = req.headers["user-agent"] || "Not provided";
+  const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress || 'Unknown';
+  const userAgent = req.headers['user-agent'] || 'Not provided';
 
-  const handleSecurityAlert = async (alertData) => {
+  async function handleSecurityAlert(alertData) {
     if (!SECURITY_WEBHOOK_URL) return;
 
     const embed = {
       title: alertData.title || "Security Alert",
-      description: alertData.description,
+      description: alertData.description || "",
       color: 0xff0000,
       fields: alertData.fields || [],
-      timestamp: new Date().toISOString(),
+      timestamp: new Date().toISOString()
     };
 
-    await fetch(SECURITY_WEBHOOK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ embeds: [embed] }),
-    }).catch(console.error);
-  };
+    try {
+      await fetch(SECURITY_WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ embeds: [embed] })
+      });
+    } catch (err) {
+      console.error("Security alert webhook failed:", err);
+    }
+  }
 
+  // Security check - user agent
   if (userAgent !== ALLOWED_USER_AGENT) {
     await handleSecurityAlert({
       title: "Unauthorized Access Attempt",
@@ -47,106 +57,119 @@ export default async function handler(req, res) {
       fields: [
         { name: "IP Address", value: ip, inline: true },
         { name: "User-Agent", value: userAgent, inline: true },
-        { name: "Endpoint", value: req.url, inline: true },
-      ],
+        { name: "Endpoint", value: req.url, inline: true }
+      ]
     });
     return res.status(403).json({ error: "Unauthorized" });
   }
 
-  if (req.method !== "POST") {
+  if (req.method !== 'POST') {
     await handleSecurityAlert({
       description: `Invalid HTTP method (${req.method}) used`,
       fields: [
         { name: "IP Address", value: ip },
-        { name: "Expected Method", value: "POST" },
-      ],
+        { name: "Expected Method", value: "POST" }
+      ]
     });
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const form = formidable({ multiples: false });
+  try {
+    // Parse multipart/form-data (with files) OR JSON body
+    let payload = null;
+    let attachments = [];
 
-  form.parse(req, async (err, fields, files) => {
-    if (err) {
-      console.error("Form parsing error:", err);
-      return res.status(400).json({ error: "Bad Request" });
-    }
+    const contentType = req.headers['content-type'] || '';
 
-    let embeds = [];
+    if (contentType.startsWith('multipart/form-data')) {
+      await runMulter(req, res);
 
-    try {
-      if (fields.embeds) {
-        embeds =
-          typeof fields.embeds === "string"
-            ? JSON.parse(fields.embeds)
-            : fields.embeds;
+      // Expect a field named "payload_json" with the Discord payload JSON (embeds, content, etc)
+      const payloadJsonStr = req.body.payload_json;
+      if (!payloadJsonStr) {
+        return res.status(400).json({ error: "Missing payload_json in multipart form data" });
       }
 
-      if (!Array.isArray(embeds) || embeds.length === 0) {
+      try {
+        payload = JSON.parse(payloadJsonStr);
+      } catch {
+        return res.status(400).json({ error: "Invalid JSON in payload_json field" });
+      }
+
+      // Collect files as Discord attachments
+      if (req.files && req.files.length > 0) {
+        attachments = req.files.map((file, idx) => ({
+          id: idx,
+          filename: file.originalname,
+          contentType: file.mimetype,
+          buffer: file.buffer,
+        }));
+
+        // Discord expects 'attachments' array in payload with id/filename references
+        payload.attachments = attachments.map(a => ({
+          id: a.id,
+          filename: a.filename,
+        }));
+      }
+
+    } else if (contentType.includes('application/json')) {
+      payload = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+
+      if (!payload.embeds?.length) {
         await handleSecurityAlert({
           title: "Invalid Payload Structure",
           description: "Attempt to send message without embeds",
           fields: [
             { name: "IP Address", value: ip },
-            { name: "Raw Embeds", value: JSON.stringify(fields.embeds) },
-          ],
+            { name: "Payload", value: `\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\`` }
+          ]
         });
-        return res.status(400).json({ error: "Invalid embeds" });
-      }
-    } catch (e) {
-      console.error("Invalid embed JSON:", e);
-      return res.status(400).json({ error: "Invalid embed JSON format" });
-    }
-
-    const payload = { embeds };
-
-    // Gérer le fichier si présent
-    if (files.file) {
-      try {
-        const file = files.file;
-        const fileData = fs.readFileSync(file.filepath);
-
-        // Préparer form-data pour Discord
-        const formData = new FormData();
-        formData.append("file", new Blob([fileData]), file.originalFilename);
-        formData.append("payload_json", JSON.stringify(payload));
-
-        const response = await fetch(WEBHOOK_URL, {
-          method: "POST",
-          body: formData,
-        });
-
-        if (!response.ok) {
-          const text = await response.text();
-          console.error(`Discord API error ${response.status}:`, text);
-          throw new Error(`Discord API responded with ${response.status}`);
-        }
-
-        return res.status(200).json({ success: true });
-      } catch (error) {
-        console.error("Discord webhook error:", error);
-        return res.status(500).json({ error: "Failed to send to Discord" });
+        return res.status(400).json({ error: "Invalid payload format: embeds required" });
       }
     } else {
-      // Pas de fichier, envoi JSON classique
-      try {
-        const response = await fetch(WEBHOOK_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-
-        if (!response.ok) {
-          const text = await response.text();
-          console.error(`Discord API error ${response.status}:`, text);
-          throw new Error(`Discord API responded with ${response.status}`);
-        }
-
-        return res.status(200).json({ success: true });
-      } catch (error) {
-        console.error("Discord webhook error:", error);
-        return res.status(500).json({ error: "Failed to send to Discord" });
-      }
+      return res.status(415).json({ error: "Unsupported content type" });
     }
-  });
+
+    // Send to Discord webhook
+    let discordResponse;
+
+    if (attachments.length > 0) {
+      // Send multipart/form-data with attachments
+
+      const form = new FormData();
+      form.append('payload_json', JSON.stringify(payload));
+
+      // Attach files
+      attachments.forEach((file) => {
+        form.append('files[' + file.id + ']', file.buffer, {
+          filename: file.filename,
+          contentType: file.contentType,
+        });
+      });
+
+      discordResponse = await fetch(WEBHOOK_URL, {
+        method: 'POST',
+        headers: form.getHeaders(),
+        body: form,
+      });
+
+    } else {
+      // Just JSON
+      discordResponse = await fetch(WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+    }
+
+    if (!discordResponse.ok) {
+      throw new Error(`Discord API responded with status ${discordResponse.status}`);
+    }
+
+    return res.status(200).json({ success: true });
+
+  } catch (error) {
+    console.error("Processing error:", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
 }
