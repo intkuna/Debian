@@ -1,19 +1,26 @@
-import formidable from 'formidable';
-import fs from 'fs';
+import formidable from "formidable";
+import fs from "fs";
 
 export const config = {
   api: {
-    bodyParser: false, // nécessaire pour gérer "multipart/form-data"
+    bodyParser: false, // obligatoire pour formidable
   },
 };
 
-export default async (req, res) => {
+export default async function handler(req, res) {
   const ALLOWED_USER_AGENT = "DebianSystemReporter/1.0";
   const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
   const SECURITY_WEBHOOK_URL = process.env.SECURITY_WEBHOOK_URL;
 
-  const ip = req.headers['x-forwarded-for'] || req.connection.remoteAddress || 'Unknown';
-  const userAgent = req.headers['user-agent'] || 'Not provided';
+  if (!WEBHOOK_URL) {
+    return res.status(500).json({ error: "Server configuration error" });
+  }
+
+  const ip =
+    req.headers["x-forwarded-for"] ||
+    req.connection.remoteAddress ||
+    "Unknown";
+  const userAgent = req.headers["user-agent"] || "Not provided";
 
   const handleSecurityAlert = async (alertData) => {
     if (!SECURITY_WEBHOOK_URL) return;
@@ -27,8 +34,8 @@ export default async (req, res) => {
     };
 
     await fetch(SECURITY_WEBHOOK_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ embeds: [embed] }),
     }).catch(console.error);
   };
@@ -46,7 +53,7 @@ export default async (req, res) => {
     return res.status(403).json({ error: "Unauthorized" });
   }
 
-  if (req.method !== 'POST') {
+  if (req.method !== "POST") {
     await handleSecurityAlert({
       description: `Invalid HTTP method (${req.method}) used`,
       fields: [
@@ -69,8 +76,10 @@ export default async (req, res) => {
 
     try {
       if (fields.embeds) {
-        // Peut être un string ou déjà un objet
-        embeds = typeof fields.embeds === "string" ? JSON.parse(fields.embeds) : fields.embeds;
+        embeds =
+          typeof fields.embeds === "string"
+            ? JSON.parse(fields.embeds)
+            : fields.embeds;
       }
 
       if (!Array.isArray(embeds) || embeds.length === 0) {
@@ -91,22 +100,27 @@ export default async (req, res) => {
 
     const payload = { embeds };
 
-    // Handle file
+    // Gérer le fichier si présent
     if (files.file) {
-      const file = files.file;
-      const fileData = fs.readFileSync(file.filepath);
-
-      const formData = new FormData();
-      formData.append('file', new Blob([fileData]), file.originalFilename);
-      formData.append('payload_json', JSON.stringify(payload));
-
       try {
+        const file = files.file;
+        const fileData = fs.readFileSync(file.filepath);
+
+        // Préparer form-data pour Discord
+        const formData = new FormData();
+        formData.append("file", new Blob([fileData]), file.originalFilename);
+        formData.append("payload_json", JSON.stringify(payload));
+
         const response = await fetch(WEBHOOK_URL, {
-          method: 'POST',
+          method: "POST",
           body: formData,
         });
 
-        if (!response.ok) throw new Error(`Discord API responded with ${response.status}`);
+        if (!response.ok) {
+          const text = await response.text();
+          console.error(`Discord API error ${response.status}:`, text);
+          throw new Error(`Discord API responded with ${response.status}`);
+        }
 
         return res.status(200).json({ success: true });
       } catch (error) {
@@ -114,15 +128,19 @@ export default async (req, res) => {
         return res.status(500).json({ error: "Failed to send to Discord" });
       }
     } else {
-      // No file, send JSON payload directly
+      // Pas de fichier, envoi JSON classique
       try {
         const response = await fetch(WEBHOOK_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
 
-        if (!response.ok) throw new Error(`Discord API responded with ${response.status}`);
+        if (!response.ok) {
+          const text = await response.text();
+          console.error(`Discord API error ${response.status}:`, text);
+          throw new Error(`Discord API responded with ${response.status}`);
+        }
 
         return res.status(200).json({ success: true });
       } catch (error) {
@@ -131,4 +149,4 @@ export default async (req, res) => {
       }
     }
   });
-};
+}
