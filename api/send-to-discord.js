@@ -1,11 +1,10 @@
 import formidable from 'formidable';
 import fs from 'fs';
-import fetch from 'node-fetch'; // If on Node 18+, native fetch is available; otherwise install node-fetch
 import path from 'path';
 
 export const config = {
   api: {
-    bodyParser: false, // Required to handle multipart form data with formidable
+    bodyParser: false, // IMPORTANT pour formidable
   },
 };
 
@@ -44,7 +43,6 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Server configuration error" });
   }
 
-  // Security: Validate User-Agent
   if (userAgent !== ALLOWED_USER_AGENT) {
     await sendSecurityAlert({
       title: "Unauthorized Access Attempt",
@@ -58,7 +56,6 @@ export default async function handler(req, res) {
     return res.status(403).json({ error: "Unauthorized" });
   }
 
-  // Only accept POST requests
   if (req.method !== 'POST') {
     await sendSecurityAlert({
       description: `Invalid HTTP method (${req.method}) used`,
@@ -70,7 +67,6 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // Parse multipart form data with formidable
   const form = new formidable.IncomingForm({ multiples: true, keepExtensions: true });
 
   form.parse(req, async (err, fields, files) => {
@@ -80,7 +76,6 @@ export default async function handler(req, res) {
     }
 
     try {
-      // Validate embeds field presence and parse it
       if (!fields.embeds) {
         await sendSecurityAlert({
           title: "Invalid Payload Structure",
@@ -114,12 +109,11 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: "Invalid embeds format" });
       }
 
-      // Prepare form-data payload for Discord webhook
+      // Construction de la requête multipart/form-data pour Discord
       const formData = new FormData();
       formData.append("payload_json", JSON.stringify({ embeds }));
 
-      // Attach files if any
-      // Normalize files to array (formidable returns object or array)
+      // Gestion des fichiers
       const filesArray = [];
       if (files.file) {
         if (Array.isArray(files.file)) {
@@ -129,18 +123,16 @@ export default async function handler(req, res) {
         }
       }
 
-      // Add files to formData
       for (const file of filesArray) {
         if (!file || !file.filepath) continue;
-        const fileStream = fs.createReadStream(file.filepath);
-        formData.append("files[]", fileStream, file.originalFilename || path.basename(file.filepath));
+        const stream = fs.createReadStream(file.filepath);
+        formData.append("files[]", stream, file.originalFilename || path.basename(file.filepath));
       }
 
-      // Send request to Discord webhook
+      // Envoi vers Discord webhook
       const discordResponse = await fetch(WEBHOOK_URL, {
         method: 'POST',
         body: formData,
-        // Note: node-fetch sets correct headers automatically for multipart/form-data when using formData
       });
 
       if (!discordResponse.ok) {
