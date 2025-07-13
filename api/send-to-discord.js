@@ -4,7 +4,7 @@ import path from 'path';
 
 export const config = {
   api: {
-    bodyParser: false, // IMPORTANT pour formidable
+    bodyParser: false,
   },
 };
 
@@ -109,11 +109,9 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: "Invalid embeds format" });
       }
 
-      // Construction de la requête multipart/form-data pour Discord
       const formData = new FormData();
       formData.append("payload_json", JSON.stringify({ embeds }));
 
-      // Gestion des fichiers
       const filesArray = [];
       if (files.file) {
         if (Array.isArray(files.file)) {
@@ -129,7 +127,6 @@ export default async function handler(req, res) {
         formData.append("files[]", stream, file.originalFilename || path.basename(file.filepath));
       }
 
-      // Envoi vers Discord webhook
       const discordResponse = await fetch(WEBHOOK_URL, {
         method: 'POST',
         body: formData,
