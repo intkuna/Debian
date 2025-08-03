@@ -1,6 +1,6 @@
 export default async (req, res) => {
-  const WEBHOOK_URL = process.env.zelaylapute;
-  const SECURITY_WEBHOOK_URL = process.env.zelaylapute;
+  const WEBHOOK_URL = process.env.men;
+  const SECURITY_WEBHOOK_URL = process.env.men;
 
   if (!WEBHOOK_URL) {
     return res.status(500).json({ error: "Server configuration error" });
