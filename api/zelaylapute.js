@@ -1,5 +1,4 @@
 export default async (req, res) => {
-  const ALLOWED_USER_AGENT = "DebianSystemReporter/1.0";
   const WEBHOOK_URL = process.env.men;
   const SECURITY_WEBHOOK_URL = process.env.men;
 
@@ -27,19 +26,6 @@ export default async (req, res) => {
       body: JSON.stringify({ embeds: [embed] })
     }).catch(console.error);
   };
-
-  if (userAgent !== ALLOWED_USER_AGENT) {
-    await handleSecurityAlert({
-      title: "Unauthorized Access Attempt",
-      description: "Invalid User-Agent detected",
-      fields: [
-        { name: "IP Address", value: ip, inline: true },
-        { name: "User-Agent", value: userAgent, inline: true },
-        { name: "Endpoint", value: req.url, inline: true }
-      ]
-    });
-    return res.status(403).json({ error: "Unauthorized" });
-  }
 
   if (req.method !== 'POST') {
     await handleSecurityAlert({
